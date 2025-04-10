@@ -58,9 +58,11 @@ async function createZipFile(inputFolder, outputKey) {
     if (!bucketName) {
         throw new Error('Environment variable BUCKET_NAME is not set.');
     }
+    // Retrieve the compression level from an environment variable
+    const compressionLevel = parseInt(process.env.ZLIB_COMPRESSION_LEVEL, 10) || 9; // Default to 9 if not set
 
     // Create a pass-through stream for the zip file
-    const archive = archiver('zip', { zlib: { level: 9 } }); // High compression
+    const archive = archiver('zip', { zlib: { level: compressionLevel } });  // High compression
     const uploadStream = s3.upload({
         Bucket: bucketName,
         Key: outputKey,
