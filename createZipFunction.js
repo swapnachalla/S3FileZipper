@@ -1,6 +1,7 @@
 const AWS = require('aws-sdk');
 const archiver = require('archiver');
 const s3 = new AWS.S3();
+const sqs = new AWS.SQS();
 
 const MAX_RETRIES = 3;
 
@@ -13,7 +14,8 @@ const MAX_RETRIES = 3;
 */
 //Create lambda layer for archiver 
 //npm install aws-sdk archiver 
-// This Lambda function processes messages from an SQS queue, creates a zip file from S3 objects,
+// This Lambda function processes messages from an SQS queue, creates a zip file from S3 objects,and sends a presigned URL 
+//for the output zip file to another SQS queue.
 exports.handler = async (event) => {
     try {
         const records = event.Records || [];
@@ -40,7 +42,12 @@ async function processMessage(record) {
 
     while (retryCount <= MAX_RETRIES) {
         try {
-            await createZipFile(inputFolder, outputKey);
+            // Create the zip file and get the presigned URL
+            const presignedUrl = await createZipFile(inputFolder, outputKey);
+
+            // Send the presigned URL to the SQS queue
+            await sendPresignedUrlToSQS(record.messageId, presignedUrl);
+
             console.log(`Successfully processed message: ${record.messageId}`);
             return;
         } catch (error) {
@@ -53,6 +60,7 @@ async function processMessage(record) {
         }
     }
 }
+
 async function createZipFile(inputFolder, outputKey) {
     const bucketName = process.env.BUCKET_NAME;
     if (!bucketName) {
@@ -82,7 +90,17 @@ async function createZipFile(inputFolder, outputKey) {
 
     await archive.finalize(); // Finalize the archive
     await uploadStream; // Wait for the upload to complete
+
     console.log(`Zip file created successfully at ${outputKey}`);
+
+    // Generate a presigned URL for the uploaded zip file
+    const presignedUrl = s3.getSignedUrl('getObject', {
+        Bucket: bucketName,
+        Key: outputKey,
+        Expires: 3600, // URL expires in 1 hour
+    });
+
+    return presignedUrl;
 }
 
 async function listS3Objects(bucketName, folderPath) {
@@ -105,4 +123,24 @@ async function listS3Objects(bucketName, folderPath) {
     } while (continuationToken);
 
     return objects.filter(obj => obj.Size > 0); // Exclude folders
+}
+// Function to send the presigned URL to an SQS queue
+async function sendPresignedUrlToSQS(messageId, presignedUrl) {
+    const queueUrl = process.env.OUTPUT_SQS_QUEUE_URL;
+    if (!queueUrl) {
+        throw new Error('Environment variable OUTPUT_SQS_QUEUE_URL is not set.');
+    }
+
+    const message = {
+        MessageId: messageId,
+        PresignedUrl: presignedUrl,
+    };
+
+    const params = {
+        QueueUrl: queueUrl,
+        MessageBody: JSON.stringify(message),
+    };
+
+    await sqs.sendMessage(params).promise();
+    console.log(`Presigned URL sent to SQS queue: ${queueUrl}`);
 }
